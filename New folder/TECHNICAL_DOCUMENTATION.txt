@@ -1,0 +1,318 @@
+AutoStream Lead Agent - Technical Documentation
+
+1. Project Purpose
+
+This project implements a conversational lead-generation backend for the AutoStream assignment. The system is designed to:
+
+- detect user intent from incoming chat messages
+- retrieve grounded answers from a local knowledge base
+- maintain conversation state across multiple turns
+- collect lead details when the user shows buying intent
+- trigger a mock lead-capture tool that stores qualified lead data
+
+
+2. High-Level Architecture
+
+The implementation is a lightweight FastAPI service with modular Python components.
+
+Main layers:
+
+- API layer
+  Handles HTTP requests and responses.
+  File: app/main.py
+
+- Agent layer
+  Contains the core orchestration logic for intent classification, state handling, retrieval, and lead capture.
+  File: app/agent.py
+
+- Knowledge retrieval layer
+  Loads local markdown files and returns the most relevant text chunks using token overlap scoring.
+  File: app/knowledge_base.py
+
+- Lead persistence layer
+  Saves captured leads to a JSONL file.
+  File: app/lead_store.py
+
+- Data models layer
+  Defines request, response, state, and enum models using Pydantic.
+  File: app/models.py
+
+- Optional LLM layer
+  Integrates Groq for intent classification and grounded response generation when `GROQ_API_KEY` is available.
+  File: app/llm.py
+
+
+3. Request Flow
+
+The main request flow through `/chat` is:
+
+1. Client sends `session_id` and `message`.
+2. FastAPI validates the request using `ChatRequest`.
+3. `AutoStreamAgent.respond()` is called.
+4. The agent loads or creates conversation state for that session.
+5. The message is classified into an intent.
+6. The agent extracts any lead fields from the raw message.
+7. If the user is in lead-capture mode, the agent asks for missing details or saves the lead.
+8. If the user is asking product questions, the agent retrieves relevant knowledge-base chunks.
+9. A structured `ChatResponse` is returned.
+
+
+4. Intent Classification
+
+Intent types are defined in `app/models.py`:
+
+- greeting
+- pricing
+- policy
+- feature
+- lead_capture
+- general
+- out_of_scope
+
+Intent classification strategy:
+
+- First, the system attempts Groq classification if enabled.
+- If Groq is unavailable or fails, the system falls back to deterministic rule-based matching.
+
+Rule-based examples:
+
+- pricing: triggered by terms like `pricing`, `price`, `plan`, `cost`
+- policy: triggered by terms like `refund`, `cancel`, `security`, `support`, `sla`
+- feature: triggered by terms like `feature`, `integration`, `automation`, `crm`
+- lead_capture: triggered by phrases such as `book a demo`, `talk to sales`, `interested`, `buy`
+
+
+5. Retrieval Design
+
+The local retrieval implementation is intentionally simple and dependency-light.
+
+Knowledge source:
+
+- `data/knowledge_base/pricing_features.md`
+- `data/knowledge_base/company_policies.md`
+
+Chunking strategy:
+
+- each markdown file is split by blank lines
+- each resulting block becomes a retrievable chunk
+
+Ranking strategy:
+
+- tokenize the query into lowercase alphanumeric terms
+- tokenize each chunk the same way
+- compute token overlap count
+- sort descending by overlap score
+- return top `k` chunks, default `k = 3`
+
+This is not vector search. It is lexical retrieval optimized for simplicity and local execution.
+
+
+6. Stateful Conversation Management
+
+Session state is stored in memory in `AutoStreamAgent.sessions`.
+
+Each session contains:
+
+- `session_id`
+- `history`
+- `lead_status`
+- `lead`
+
+Lead statuses:
+
+- unqualified
+- discovering
+- qualified
+- captured
+
+Behavior:
+
+- once lead intent is detected, the session enters discovery mode
+- the system continues asking for missing required lead fields across future turns
+- required fields are name, email, company, and use_case
+- when all required fields are present, the lead is stored and the session is marked captured
+
+Note:
+
+- state is in-memory only for the active app process
+- restarting the process resets active conversation sessions
+
+
+7. Lead Extraction
+
+The agent extracts lead information directly from user messages using regex and keyword-driven heuristics.
+
+Extracted fields:
+
+- email
+- name
+- company
+- use_case
+- team_size
+- budget
+
+Examples:
+
+- email via standard email regex
+- name via phrases like `my name is ...` or `I'm ...`
+- company via phrases like `from ...` or `company ...`
+- budget via currency and monthly-value patterns
+
+Only a subset is required for final lead capture:
+
+- name
+- email
+- company
+- use_case
+
+
+8. Lead Persistence Tool
+
+The mock lead-capture tool is implemented in `app/lead_store.py`.
+
+Storage format:
+
+- JSON Lines
+- file path: `data/leads.jsonl`
+
+Each saved record contains:
+
+- session_id
+- name
+- email
+- company
+- use_case
+- team_size
+- budget
+
+JSONL is used because it is append-friendly, human-readable, and easy to inspect or import later.
+
+
+9. Optional Groq Integration
+
+Groq integration is encapsulated in `app/llm.py`.
+
+Capabilities:
+
+- classify intent with a strict JSON response
+- generate grounded answers using retrieved context
+
+Behavior:
+
+- if `GROQ_API_KEY` is set and the `groq` package is installed, the app tries Groq first
+- if Groq fails, the app falls back to local logic
+
+Environment variables:
+
+- `GROQ_API_KEY`
+- `GROQ_MODEL`
+
+Default model:
+
+- `llama-3.1-8b-instant`
+
+
+10. API Surface
+
+Health endpoint:
+
+- `GET /health`
+- returns `{ "status": "ok" }`
+
+Chat endpoint:
+
+- `POST /chat`
+- request body:
+  - `session_id: string`
+  - `message: string`
+
+Response fields:
+
+- `session_id`
+- `response`
+- `intent`
+- `lead_status`
+- `retrieved_context`
+- `lead`
+
+
+11. Files Added
+
+Core application:
+
+- app/__init__.py
+- app/config.py
+- app/models.py
+- app/knowledge_base.py
+- app/lead_store.py
+- app/llm.py
+- app/agent.py
+- app/main.py
+
+Knowledge base:
+
+- data/knowledge_base/pricing_features.md
+- data/knowledge_base/company_policies.md
+
+Testing and setup:
+
+- tests/test_agent.py
+- requirements.txt
+- README.md
+- .env.example
+
+Documentation:
+
+- TECHNICAL_DOCUMENTATION.txt
+- NON_TECHNICAL_EXPLANATION.txt
+
+
+12. Testing Coverage
+
+Tests currently cover:
+
+- pricing intent retrieval
+- policy retrieval
+- multi-turn lead capture flow
+
+Test file:
+
+- `tests/test_agent.py`
+
+Current limitation:
+
+- tests were not executed in this sandbox because the local Python runtime was blocked by environment permissions
+
+
+13. Current Limitations
+
+- retrieval is lexical, not embedding-based
+- session state is in-memory and not shared across restarts
+- lead storage is file-based, not database-backed
+- no authentication layer is included
+- no frontend UI is included
+- no PDF extraction pipeline was implemented because the environment blocked normal local parsing tools
+
+
+14. Recommended Next Improvements
+
+- replace lexical retrieval with embedding search
+- persist sessions in Redis or a database
+- store leads in PostgreSQL or another structured datastore
+- add structured logging and error monitoring
+- add API authentication
+- create a simple frontend chat UI
+- expand tests to cover more lead qualification paths
+- improve LLM prompts and add output validation for Groq responses
+
+
+15. Summary
+
+The project is a complete backend prototype that satisfies the assignment shape:
+
+- intent identification
+- local knowledge retrieval
+- multi-turn agent workflow
+- tool-triggered lead capture
+- optional Groq-powered upgrade path
+
